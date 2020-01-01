@@ -40,26 +40,35 @@ export default function workerize(code, options) {
 		let id = `rpc${++counter}`;
 		callbacks[id] = [resolve, reject];
 		worker.postMessage({ type: 'RPC', id, genId, method, genStatus, params });
-	}).then(d => !d.hasOwnProperty("genId") ? d : (async function* workerAsyncGenPassthrough () {
-				const genId = d.genId;
-				try {
-					let result = {done: false};
-					let value;
-					while (!result.done) {
-						result = await worker.call(method, [value], 0, genId);
-						if (result.done) { break; }
-						value = yield result.value;
-					}
-					return result.value;
-				}
-				catch (err) {
-					await worker.call(method, ['' + err], 2, genId);
+	}).then((d) => {
+		if (!d.hasOwnProperty('genId')) {
+			return d;
+		}
+		return (() => {
+			const genId = d.genId;
+			return {
+				done: false,
+				async next (value) {
+					if (this.done) { return { value: undefined, done: true }; }
+					const result = await worker.call(method, [value], 0, genId);
+					if (result.done) { return this.return(result.value); }
+					return result;
+				},
+				async return (value) {
+					await worker.call(method, [value], 1, genId);
+					this.done = true;
+					return { value, done: true };
+				},
+				async throw (err) {
+					await worker.call(method, [err], 0, genId);
 					throw err;
+				},
+				[Symbol.asyncIterator] () {
+					return this;
 				}
-				finally {
-					await worker.call(method, [undefined], 1, genId);
-				}
-			})());
+			};
+		})();
+	});
 	worker.rpcMethods = {};
 	setup(worker, worker.rpcMethods, callbacks);
 	worker.expose = methodName => {
@@ -111,6 +120,7 @@ function setup(ctx, rpcMethods, callbacks) {
 			// genId should only be sent to the main thread when initializing the generator
 			if(data.genId) { data.result.genId = data.genId; }
 			if (data.error) callback[1](Error(data.error));
+			// genId should only be sent to the main thread when initializing the generator
 			else callback[0](data.result);
 		}
 	});
